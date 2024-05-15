@@ -1,9 +1,9 @@
-#add into folders based on date.
 #export a geo file
 #make font bold?
 
 import os
 import piexif
+import shutil
 from PIL import Image, ImageDraw, ImageFont
 from PIL.ExifTags import TAGS, GPSTAGS
 from datetime import datetime
@@ -125,16 +125,19 @@ def rename_image(fn, date_taken):
 
     directory, filename = os.path.split(fn)
     base, ext = os.path.splitext(filename)
-    new_name = f"{date_taken[:2]}{date_taken[3:5]}_{base}{ext}"
-    new_path = os.path.join(directory, new_name)
-    os.rename(fn, new_path)
+    new_folder = f"{date_taken[:2]}{date_taken[3:5]}"
+    new_folder_path = os.path.join(directory, new_folder)
+    os.makedirs(new_folder_path, exist_ok=True)
+    new_name = f"{new_folder}_{base}{ext}"
+    new_path = os.path.join(new_folder_path, new_name)
+    shutil.move(fn, new_path)
 
 
 def process_images(directory):
     for filename in os.listdir(directory):
         if filename.endswith(".jpg"):
             path = os.path.join(directory, filename)
-            date_taken = watermark_with_exif(path)  # Remove the second argument
+            date_taken = watermark_with_exif(path)  
             rename_image(path, date_taken)
 
 
