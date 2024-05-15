@@ -1,10 +1,10 @@
-#still need to preserve the exif data
 #add into folders based on date.
 #export a geo file
 #make font bold?
 
 import os
-from PIL import Image, ImageDraw
+import piexif
+from PIL import Image, ImageDraw, ImageFont
 from PIL.ExifTags import TAGS, GPSTAGS
 from datetime import datetime
 
@@ -14,7 +14,6 @@ def get_geotagging(exif):
 
     geotagging = exif[34853]
     return geotagging
-
 
 def get_date_taken(exif):
     if 306 not in exif:
@@ -31,19 +30,31 @@ def get_date_taken(exif):
 
     return formatted_date
 
-from PIL import ImageFont
+
+
+def sanitize_exif(exif):
+    sanitized = {}
+    for tag, value in exif.items():
+        try:
+            # Check if the value is a bytes object and if all bytes are in range(0, 256)
+            if isinstance(value, bytes) and all(b in range(256) for b in value):
+                sanitized[tag] = value
+        except TypeError:
+            # The value is not iterable, skip it
+            pass
+    return sanitized
 
 def watermark_with_exif(fn):
     img = Image.open(fn)
-    exif = img._getexif()
+    exif_data = img._getexif()
 
-    if exif is None:
+    if exif_data is None:
         print(f"No EXIF data found for {fn}, skipping.")
         return None
 
     try:
-        geotagging = get_geotagging(exif)
-        date_taken = get_date_taken(exif)
+        geotagging = get_geotagging(exif_data)
+        date_taken = get_date_taken(exif_data)
     except ValueError as e:
         print(f"Error processing {fn}: {e}, skipping.")
         return None
@@ -96,7 +107,14 @@ def watermark_with_exif(fn):
 
     d.text((x, y), watermark_text_date, font=font, fill=(50,205,50))  # Use lime green color
 
-    img.save(fn)
+    # Save the image to a temporary file
+    filename, file_extension = os.path.splitext(fn)
+    temp_fn = filename + "_temp" + file_extension
+    img.save(temp_fn, exif=img.info["exif"])
+
+    # Replace the original image with the new image
+    os.remove(fn)
+    os.rename(temp_fn, fn)  
 
     return date_taken
 
@@ -123,3 +141,4 @@ def process_images(directory):
 
 # Call the function with the path to your directory
 process_images(r"C:\\Users\\Alexander.Hutcheson\\OneDrive - Michael Baker International\\Desktop\\Misc\\scratch\\BreakupPhotos")
+
