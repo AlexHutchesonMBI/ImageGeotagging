@@ -1,17 +1,28 @@
 import os
-import piexif
-import shutil
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ExifTags
 from PIL.ExifTags import TAGS, GPSTAGS
+from pykml.factory import KML_ElementMaker as KML
+from lxml import etree
 from datetime import datetime
+import shutil
 
 def get_geotagging(exif):
-    if 34853 not in exif:
+    if not exif or 34853 not in exif:
         raise ValueError("No EXIF geotagging found")
 
     geotagging = exif[34853]
-    if 2 not in geotagging or 4 not in geotagging:
+    for (idx, tag) in TAGS.items():
+        if tag == 'GPSInfo':
+            if idx not in exif:
+                raise ValueError("No EXIF geotagging found")
+
+            for (tidx, ttag) in GPSTAGS.items():
+                if tidx in exif[idx]:
+                    geotagging[ttag] = exif[idx][tidx]
+
+    if 'GPSLatitude' not in geotagging or 'GPSLongitude' not in geotagging:
         raise ValueError("No latitude or longitude information found in EXIF data")
+
     return geotagging
 
 def get_date_taken(exif):
@@ -30,25 +41,26 @@ def get_date_taken(exif):
     return formatted_date
 
 def get_orientation(exif_data):
-    """
-    Get the orientation value from the EXIF data.
-    :param exif_data: Dictionary containing EXIF data
-    :return: Orientation value (default to 1 if not found)
-    """
+    #Get the orientation value from the EXIF data.
     for tag, value in exif_data.items():
         if ExifTags.TAGS.get(tag) == 'Orientation':
             return value
     return 1  # Default orientation value if not found
 
 def rotate_image(exif_data, img):
-    """
-    Rotate the image based on the orientation value.
-    :param exif_data: Dictionary containing EXIF data
-    :return: Rotation angle (0, 90, 180, or 270 degrees)
-    """
+    #Rotate the image based on the orientation value.
+ 
     orientation = get_orientation(exif_data)
     if orientation == 6:
         return img.rotate(270, expand=True)
+    return img
+
+def out_rotate_image(exif_data, img):
+    #Rotate the image back to vertical for the final output.
+   
+    orientation = get_orientation(exif_data)
+    if orientation == 6:
+        return img.rotate(-270, expand=True)
     return img
 
 def sanitize_exif(exif):
@@ -145,33 +157,123 @@ def watermark_with_exif(fn):
 
     # Replace the original image with the new image
     os.remove(fn)
-    os.rename(temp_fn, fn)  
+    os.rename(temp_fn, fn)
+
+    # Rotate the image back to the original orientation
+    img = Image.open(fn)
+    img = out_rotate_image(exif_data, img)
+    img.save(fn, exif=img.info["exif"])
 
     return date_taken
 
 
 def rename_image(fn, date_taken):
     if date_taken is None:
+        return fn
+
+    directory, filename = os.path.split(fn)
+    base, ext = os.path.splitext(filename)
+    folder_name = os.path.basename(directory)
+    new_name = f"{date_taken[:2]}{date_taken[3:5]}_{folder_name}_{base}{ext}"
+    new_path = os.path.join(directory, new_name)
+    shutil.move(fn, new_path)
+
+    return new_path  # Return the new path
+
+def move_image(fn, date_taken, root_directory):
+    if date_taken is None:
         return
 
     directory, filename = os.path.split(fn)
     base, ext = os.path.splitext(filename)
     new_folder = f"{date_taken[:2]}{date_taken[3:5]}"
-    new_folder_path = os.path.join(directory, new_folder)
+    new_folder_path = os.path.join(root_directory, new_folder)
     os.makedirs(new_folder_path, exist_ok=True)
-    new_name = f"{new_folder}_{base}{ext}"
-    new_path = os.path.join(new_folder_path, new_name)
+    new_path = os.path.join(new_folder_path, filename)
     shutil.move(fn, new_path)
 
 
+def get_decimal_from_dms(dms, ref):
+    degrees = dms[0]
+    minutes = dms[1] / 60.0
+    seconds = dms[2] / 3600.0
+
+    if ref in ['S', 'W']:
+        degrees = -degrees
+        minutes = -minutes
+        seconds = -seconds
+
+    return round(degrees + minutes + seconds, 5)
+
+def get_coordinates(geotags):
+    lat = get_decimal_from_dms(geotags['GPSLatitude'], geotags['GPSLatitudeRef'])
+    lon = get_decimal_from_dms(geotags['GPSLongitude'], geotags['GPSLongitudeRef'])
+
+    return (lat,lon)
+
 def process_images(directory):
-    for filename in os.listdir(directory):
-        if filename.lower().endswith(".jpg") or filename.lower().endswith(".jpeg"):
-            path = os.path.join(directory, filename)
-            date_taken = watermark_with_exif(path)  
-            rename_image(path, date_taken)
+    for root, dirs, files in os.walk(directory):
+        for filename in files:
+            if filename.lower().endswith(".jpg") or filename.lower().endswith(".jpeg"):
+                path = os.path.join(root, filename)
+                date_taken = watermark_with_exif(path)
+                path = rename_image(path, date_taken)  # Update the path after renaming
+                move_image(path, date_taken, directory)  # Then move the image
+
+    # After processing all images, call the function from script 2 for each subdirectory
+    for subdirectory in os.listdir(directory):
+        subdirectory_path = os.path.join(directory, subdirectory)
+        if os.path.isdir(subdirectory_path):
+            create_kml(subdirectory_path)
 
 
 
+def create_kml(folder_path):
+    kml_doc = KML.kml(KML.Document())  # Create a Document element inside the KML root element
+
+    for filename in os.listdir(folder_path):
+        if filename.lower().endswith(".jpg") or filename.lower().endswith(".png"):
+            image_path = os.path.join(folder_path, filename)
+            image_path = os.path.normpath(image_path)  # Normalize the path to use the correct platform-specific separator
+            image_path = image_path.replace("\\", "/")  # Replace backslashes with forward slashes
+            image = Image.open(image_path)
+            exif = image._getexif()
+            try:
+                geotags = get_geotagging(exif)
+                coordinates = get_coordinates(geotags)
+                placemark = KML.Placemark(
+                    KML.name(filename),
+                    KML.LookAt(
+                        KML.longitude(coordinates[1]),
+                        KML.latitude(coordinates[0]),
+                        KML.range(1000),  # Adjust this value to change the initial zoom level
+                        KML.tilt(0),
+                        KML.heading(0),
+                    ),
+                    KML.Point(
+                        KML.coordinates(f"{coordinates[1]},{coordinates[0]}")
+                    ),
+                    KML.description(
+                        '<img style="max-width:500px;" src="file:///{}">'.format(image_path)
+                    )
+                )
+                kml_doc.Document.append(placemark)
+            except ValueError as e:
+                print(f"Skipping {filename}: {e}")
+
+    kml_str = etree.tostring(kml_doc, pretty_print=True).decode()
+
+    # Get the folder name and create the KML file name
+    folder_name = os.path.basename(folder_path)
+    kml_file_name = f"{folder_name}_locations.kml"
+    kml_file_path = os.path.join(folder_path, kml_file_name)
+
+    with open(kml_file_path, "w") as f:
+        f.write(kml_str)
+
+    print(f"KML file has been written to {kml_file_path}")
+
+ 
 # Call the function with the path to your directory
 process_images(r"C:\\Users\\Alexander.Hutcheson\\OneDrive - Michael Baker International\\Desktop\\Misc\\scratch\\BreakupPhotos\\testImages")
+
